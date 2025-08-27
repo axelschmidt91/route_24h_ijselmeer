@@ -739,7 +739,6 @@ def optimize_variants(buoys: pd.DataFrame, routes: pd.DataFrame, polar: Bilinear
 # ------------------------------- Streamlit UI ----------------------------------------
 
 st.set_page_config(page_title="Segel-Routenplaner", layout="wide")
-st.title("⛵ Segel-Routenplaner mit Polar, Abdrift & Optimierung")
 
 # load visit log and next target from data in APP_STATE_PATH
 loaded_state = _load_app_state()
