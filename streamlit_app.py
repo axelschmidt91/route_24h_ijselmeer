@@ -574,7 +574,7 @@ def make_map(buoys: pd.DataFrame, routes: pd.DataFrame, highlight_pairs: Optiona
         dist = haversine_nm(p1[0], p1[1], p2[0], p2[1])
         crs = initial_bearing_deg(p1[0], p1[1], p2[0], p2[1])
         crs_back = (crs + 180) % 360
-        txt = f"{b1} ⇄ {b2}\nDistanz: {dist:.2f} NM\nHin: {crs:.1f}°, Zurück: {crs_back:.1f}°"
+        txt = f"{b1} ⇄ {b2}\nDistanz: {dist:.2f} NM\nHin: {int(crs)}°, Zurück: {int(crs_back)}°"
         color = "red" if (b1,b2) in highlight_pairs or (b2,b1) in highlight_pairs else "blue"
         folium.PolyLine([p1, p2], tooltip=txt, color=color, weight=4 if color=="red" else 2, opacity=0.8).add_to(m)
 
@@ -908,7 +908,7 @@ with col_center:
         # Highlight according to selected variant (set later)
         highlight = st.session_state.get('highlight_pairs', [])
         fmap = make_map(buoys_df, routes_df, highlight_pairs=highlight)
-        st_data = st_folium(fmap, width=None, height=700)
+        st_data = st_folium(fmap, width=None, height=500)
 
         # Show route table if computed with the possible Routes from next selected boje as dataframe
         if buoys_df is not None and routes_df is not None:
@@ -1007,7 +1007,7 @@ if variants:
         st.session_state['highlight_pairs'] = pairs
         if buoys_df is not None and routes_df is not None:
             fmap2 = make_map(buoys_df, routes_df, highlight_pairs=pairs)
-            st_folium(fmap2, width=None, height=700)
+            st_folium(fmap2, width=None, height=500)
 
     with st.expander("Übersicht aller Varianten (Top-Distanzen nach Abzug)"):
         rows = []
