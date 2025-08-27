@@ -826,7 +826,8 @@ if buoys_df is not None and routes_df is not None:
 col_left, col_center = st.columns([1.1, 2.0])
 
 with col_left:
-    st.subheader("Log & Nächste Boje")
+    with st.expander("📝 Log & Nächste Boje"):
+    # st.subheader("Log & Nächste Boje")
     if buoys_df is not None:
         # Log state
         log: List[Tuple[str,str]] = st.session_state.get('visit_log', [])
