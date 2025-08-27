@@ -33,6 +33,7 @@ import math
 import random
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
+from PIL import Image
 
 import numpy as np
 import pandas as pd
@@ -43,6 +44,7 @@ from streamlit_folium import st_folium
 import gpxpy
 
 APP_STATE_PATH = "./app_state.json"
+ICON_ARROW_PATH="icons/arrow_left.png"
 CACHE_DIR = "./data_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -111,7 +113,7 @@ def read_csv_flexible(path: str) -> pd.DataFrame:
     return pd.read_csv(path, sep=",", encoding="utf-8", engine="python")
 
 
-def handle_csv_uploader(label: str, key: str, expected_cols: Optional[List[str]] = None) -> Optional[pd.DataFrame]:
+def handle_polar_uploader(label: str, key: str, expected_cols: Optional[List[str]] = None) -> Optional[pd.DataFrame]:
     """File uploader with persistence to cache; returns DataFrame or cached one."""
     col1, col2 = st.columns([3,1])
     with col1:
@@ -365,14 +367,14 @@ class BilinearTable:
     """Simple bilinear interpolator for values on regular (x,y) grid.
     x: angle in deg (0..360 cyclic supported) or wind angle degrees, y: TWS (kn).
     """
-    def __init__(self, df: pd.DataFrame, angle_col: str, tws_col: str, value_col: str):
+    def __init__(self, df: pd.DataFrame, tws_col: str, twa_col: str, value_col: str):
         # Normalize angles to [0,360)
         d = df.copy()
-        d[angle_col] = d[angle_col] % 360
+        d[twa_col] = d[twa_col] % 360
         # Build pivot table
-        self.angles = np.sort(d[angle_col].unique())
+        self.angles = np.sort(d[twa_col].unique())
         self.tws = np.sort(d[tws_col].unique())
-        pivot = d.pivot_table(index=angle_col, columns=tws_col, values=value_col, aggfunc='mean')
+        pivot = d.pivot_table(index=twa_col, columns=tws_col, values=value_col, aggfunc='mean')
         # Ensure full grid
         pivot = pivot.reindex(index=self.angles, columns=self.tws)
         self.grid = pivot.values.astype(float)
@@ -406,9 +408,9 @@ class BilinearTable:
         t = (xi - x0) / (x1 - x0) if x1 != x0 else 0.0
         return j-1, j, t
 
-    def value(self, angle_deg: float, tws: float) -> float:
+    def value(self, tws: float, twa_deg: float) -> float:
         # cyclic angle: map to [0,360) and enable wrap by duplicating first row at +360
-        a = angle_deg % 360
+        a = twa_deg % 360
         # If grid spans 0..360 but may not include 360, extend for wrap
         angles = self.angles
         grid = self.grid
@@ -456,8 +458,8 @@ def compute_route_table(buoys: pd.DataFrame, routes: pd.DataFrame,
         twa_rev = abs(angle_diff(twd_deg, crs_rev))
 
         # boat speeds via polar
-        bs_fwd = polar.value(twa_fwd, tws_kn) if polar else np.nan
-        bs_rev = polar.value(twa_rev, tws_kn) if polar else np.nan
+        bs_fwd = round(polar.value(tws_kn, twa_fwd),2) if polar else np.nan
+        bs_rev = round(polar.value(tws_kn, twa_rev),2) if polar else np.nan
 
         # leeway (deg) positive to leeward; we'll add/subtract based on wind coming from left/right
         lw_fwd = leeway.value(twa_fwd, tws_kn) if leeway else 0.0
@@ -469,16 +471,27 @@ def compute_route_table(buoys: pd.DataFrame, routes: pd.DataFrame,
         steer_fwd = (crs_fwd + sign_fwd * lw_fwd) % 360
         steer_rev = (crs_rev + sign_rev * lw_rev) % 360
 
-        t_fwd_h = dist / bs_fwd if bs_fwd and bs_fwd > 0 else np.nan
-        t_rev_h = dist / bs_rev if bs_rev and bs_rev > 0 else np.nan
+        # time in hours
+        t_fwd_h = round(dist / bs_fwd,2) if bs_fwd and bs_fwd > 0 else np.nan
+        t_rev_h = round(dist / bs_rev,2) if bs_rev and bs_rev > 0 else np.nan
 
         rows.append({
             'Boje1': b1, 'Boje2': b2, 'Distanz_NM': dist,
-            'Richtung_hin_deg': crs_fwd, 'Richtung_zurück_deg': crs_rev,
-            'Akt_TWA_hin_deg': twa_fwd, 'Akt_TWA_zurück_deg': twa_rev,
-            'Kurs_steuern_hin_deg': steer_fwd, 'Kurs_steuern_zurück_deg': steer_rev,
-            'BS_hin_kn': bs_fwd, 'BS_zurück_kn': bs_rev,
-            'Zeit_hin_h': t_fwd_h, 'Zeit_zurück_h': t_rev_h,
+            'COG': crs_fwd, 
+            'TWA_kt': twa_fwd,
+            'HEADING': steer_fwd,
+            'BS_kt': bs_fwd,
+            'Zeit_h': t_fwd_h,
+            'Max_Passieren': passes
+        })
+
+        rows.append({
+            'Boje1': b2, 'Boje2': b1, 'Distanz_NM': dist,
+            'COG': crs_rev,
+            'TWA_kt': twa_rev,
+            'HEADING': steer_rev,
+            'BS_kt': bs_rev,
+            'Zeit_h': t_fwd_h,
             'Max_Passieren': passes
         })
 
@@ -504,35 +517,36 @@ def compute_route_table(buoys: pd.DataFrame, routes: pd.DataFrame,
 # ------------------------------- Visualization: Polar & Leeway -----------------------
 
 def plot_polar(polar_df: pd.DataFrame, tws_select: float) -> go.Figure:
-    # polar_df columns expected: Windwinkel (deg), TWS (kn), Bootsgeschwindigkeit (kn)
+    # polar_df columns expected: TWS (kn), Windwinkel (deg), Bootsgeschwindigkeit (kn)
     d = polar_df.copy()
     d.rename(columns={
-        d.columns[0]: 'angle', d.columns[1]: 'tws', d.columns[2]: 'bs'
+        d.columns[0]: 'tws', d.columns[1]: 'twa', d.columns[2]: 'bsp'
     }, inplace=True)
-    d['angle'] = d['angle'] % 360
+    d['twa'] = d['twa'] % 360
     # Filter nearest TWS values and interpolate along angle
     # Build Bilinear to interpolate a full 0..360 curve at selected TWS
-    bl = BilinearTable(d, 'angle', 'tws', 'bs')
-    angles = np.linspace(0, 359, 360)
-    speeds = [bl.value(a, tws_select) for a in angles]
+    bl = BilinearTable(d, 'tws', 'twa', 'bsp')
+    angles = np.linspace(0, 179, 180)
+    speeds = [bl.value(tws_select, a) for a in angles]
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(r=speeds, theta=angles, mode='lines', name=f'TWS {tws_select:.1f} kn'))
-    fig.update_layout(polar=dict(radialaxis=dict(title='Bootsgeschwindigkeit [kn]')), showlegend=False, margin=dict(l=10,r=10,t=10,b=10))
+    fig.update_layout(polar={"radialaxis":{"title": 'Bootsgeschwindigkeit [kn]',"range": [0, 10]}, "angularaxis":{"rotation": 90, "direction": "clockwise"}, "sector": [-90,90]}, showlegend=False, margin=dict(l=10,r=10,t=10,b=10))
+
     return fig
 
 
 def plot_leeway(leeway_df: pd.DataFrame, tws_select: float) -> go.Figure:
     d = leeway_df.copy()
     d.rename(columns={
-        d.columns[0]: 'angle', d.columns[1]: 'tws', d.columns[2]: 'lw'
+        d.columns[0]: 'tws', d.columns[1]: 'twa', d.columns[2]: 'lw'
     }, inplace=True)
-    d['angle'] = d['angle'] % 360
-    bl = BilinearTable(d, 'angle', 'tws', 'lw')
+    d['twa'] = d['twa'] % 360
+    bl = BilinearTable(d, 'tws', 'twa', 'lw')
     angles = np.linspace(0, 359, 360)
-    vals = [bl.value(a, tws_select) for a in angles]
+    vals = [bl.value(tws_select, a) for a in angles]
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(r=vals, theta=angles, mode='lines', name=f'TWS {tws_select:.1f} kn'))
-    fig.update_layout(polar=dict(radialaxis=dict(title='Abdrift [°]')), showlegend=False, margin=dict(l=10,r=10,t=10,b=10))
+    fig.update_layout(polar={"radialaxis":{"title": 'Abdrift [°]',"range": [0, 10]}, "angularaxis":{"rotation": 90, "direction": "clockwise"}, "sector": [-90,90]}, showlegend=False, margin=dict(l=10,r=10,t=10,b=10))
     return fig
 
 
@@ -602,12 +616,12 @@ def make_map(buoys: pd.DataFrame, routes: pd.DataFrame, highlight_pairs: Optiona
 
 # ------------------------------- Optimization (Heuristic) ----------------------------
 
-def interpolate_speed(polar: BilinearTable, twa: float, tws: float) -> float:
-    return max(0.0, float(polar.value(twa % 360, tws)))
+def interpolate_speed(polar: BilinearTable, tws: float, twa: float) -> float:
+    return max(0.0, float(polar.value(tws, twa % 360)))
 
 
-def interpolate_leeway(leeway: BilinearTable, twa: float, tws: float) -> float:
-    return max(0.0, float(leeway.value(twa % 360, tws)))
+def interpolate_leeway(leeway: BilinearTable, tws: float, twa: float) -> float:
+    return max(0.0, float(leeway.value(tws, twa % 360)))
 
 
 def route_graph(routes: pd.DataFrame) -> Dict[str, List[str]]:
@@ -625,11 +639,13 @@ def simulate_leg(bmap: Dict[str, Tuple[float,float]], polar: BilinearTable, leew
     lat1, lon1 = bmap[a]
     lat2, lon2 = bmap[b]
     dist = haversine_nm(lat1, lon1, lat2, lon2)
-    course = initial_bearing_deg(lat1, lon1, lat2, lon2)
-    twa = abs(angle_diff(twd, course))
-    bs = interpolate_speed(polar, twa, tws)
+    cog = initial_bearing_deg(lat1, lon1, lat2, lon2)
+    leeway_deg = ( -1 if angle_diff(twd, cog) < 0 else 1 ) * interpolate_leeway(leeway, tws, abs(angle_diff(twd, cog)))
+    heading = cog + leeway_deg
+    twa = abs(angle_diff(twd, heading))
+    bs = interpolate_speed(polar, tws, twa) * math.cos(math.radians(leeway_deg))
     hours = dist / bs if bs > 0 else float('inf')
-    return dist, course, bs, hours
+    return dist, heading, bs, hours
 
 
 def optimize_variants(buoys: pd.DataFrame, routes: pd.DataFrame, polar: BilinearTable, leeway: BilinearTable,
@@ -763,9 +779,9 @@ with st.expander("ℹ️ Einlesen von Dateien"):
     with col_u1:
         buoys_df = handle_gpx_uploader("1) Bojen GPX", key="buoys")
         routes_df, start_bojes = handle_routes_uploader("2) Routen & Limits XLSX", key="routes")
-        polar_df = handle_csv_uploader("3) Polardaten CSV", key="polar")
-    with col_u2:
-        leeway_df = handle_csv_uploader("4) Abdrift CSV", key="leeway")
+        polar_df = handle_polar_uploader("3) Polardaten CSV", key="polar")
+    with col_u2:    
+        leeway_df = handle_polar_uploader("4) Abdrift CSV", key="leeway")
         forecast_df = handle_grib_uploader("5) Windvorhersage GRIB (optional)", key="forecast")
 
 # Build interpolators if possible
@@ -779,8 +795,28 @@ if leeway_df is not None and len(leeway_df.columns) >= 3:
 # --- Controls: current wind ---
 sidebar = st.sidebar
 sidebar.header("Aktuelle Bedingungen & Optionen")
-cur_twd = sidebar.number_input("Aktuelle Windrichtung (°)", min_value=0.0, max_value=359.9, value=180.0, step=1.0)
-cur_tws = sidebar.number_input("Aktuelle Windgeschwindigkeit (kn)", min_value=0.0, max_value=100.0, value=12.0, step=0.5)
+cur_twd = sidebar.slider("TWD (°)", min_value=0, max_value=359, value=180, step=1)
+cur_tws = sidebar.slider("TWS (kn)", min_value=0, max_value=40, value=12, step=1)
+
+
+if os.path.exists(ICON_ARROW_PATH):
+    # Bild laden
+    img = Image.open(ICON_ARROW_PATH).convert("RGBA")
+
+    # Rotieren (0° = oben/Norden)
+    rotated = img.rotate(-cur_twd+90, resample=Image.BICUBIC, expand=True)
+
+    # Quadratische Leinwand für zentriertes Icon
+    canvas_size = max(rotated.width, rotated.height)
+    canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+    x = (canvas_size - rotated.width) // 2
+    y = (canvas_size - rotated.height) // 2
+    canvas.paste(rotated, (x, y), rotated)
+
+    sidebar.image(canvas, use_container_width=False)
+
+else:
+    st.error(f"⚠️ Icon nicht gefunden unter {ICON_ARROW_PATH}")
 
 # If forecast provided, allow picking a time to auto-fill twd/tws
 if forecast_df is not None and 'Datum' in forecast_df.columns[0]:
@@ -797,16 +833,16 @@ if forecast_df is not None and 'Datum' in forecast_df.columns[0]:
     except Exception:
         pass
 
-# Theoretical speed at given TWD/TWS, at best course (max over angles)
-if polar_df is not None and polar_interp is not None:
-    # approximate by sampling angle every 1°
-    angles = np.arange(0, 360)
-    # Find course with TWA close to angles -> we need BS for given TWA directly
-    speeds = np.array([polar_interp.value(a, cur_tws) for a in angles])
-    max_bs = float(np.nanmax(speeds)) if speeds.size else float('nan')
-    sidebar.metric("Theoretische aktuelle Geschwindigkeit (max über Kurse)", f"{max_bs:.2f} kn")
+# # Theoretical speed at given TWD/TWS, at best course (max over angles)
+# if polar_df is not None and polar_interp is not None:
+#     # approximate by sampling angle every 1°
+#     angles = np.arange(0, 360)
+#     # Find course with TWA close to angles -> we need BS for given TWA directly
+#     speeds = np.array([polar_interp.value(cur_tws, a) for a in angles])
+#     max_bs = float(np.nanmax(speeds)) if speeds.size else float('nan')
+#     sidebar.metric("Theoretische aktuelle Geschwindigkeit (max über Kurse)", f"{max_bs:.2f} kn")
 
-# Right column: Polar and Leeway plots
+# Left column: Polar and Leeway plots
 right = st.sidebar.container()
 right.subheader("Polar & Abdrift Diagramme")
 tws_slider = right.slider("TWS für Diagramme [kn]", min_value=0.0, max_value=40.0, value=float(cur_tws), step=0.5)
@@ -833,8 +869,10 @@ with col_left:
             next_targets(routes_df)
             st.markdown("**Bereits passierte Bojen & Zeiten**")
             with st.form("logform", clear_on_submit=False):
-                bsel = st.selectbox("Boje", options=st.session_state["next_possible_targets"], index=0 if st.session_state["next_possible_targets"] else None)
-                tsel = st.text_input("Zeit (YYYY-MM-DD HH:MM)", value=datetime.now().strftime("%Y-%m-%d %H:%M"))
+                # get the index of next target in st.session_state["next_possible_targets"]
+                next_target_index = st.session_state["next_possible_targets"].index(st.session_state["next_target"]) if st.session_state["next_target"] in st.session_state["next_possible_targets"] else 0
+                bsel = st.selectbox("Boje", options=st.session_state["next_possible_targets"], index=next_target_index)
+                tsel = st.text_input("Zeit (YYYY-MM-DD HH:MM:SS)", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 col_left, col_right = st.columns(2)
                 with col_left:
                     add = st.form_submit_button("➕ Log-Eintrag hinzufügen")
@@ -852,44 +890,47 @@ with col_left:
 
     next_targets(routes_df)
     next_target = st.selectbox("Nächste anzulaufende Boje", options=["(keine)"]+st.session_state["next_possible_targets"])
-    st.session_state['next_target'] = None if next_target == "(keine)" else next_target
+    st.session_state['next_target'] = next_target if next_target != "(keine)" else None
+
+    # 2 colums
+    col_left, col_right = st.columns(2)
 
     # Give the course and distance to next target
-    if log and st.session_state.get('next_target') and st.session_state["route_table"] is not None:
+    if log and st.session_state.get('next_target') is not None and st.session_state["route_table"] is not None:
         last_b, last_t = log[-1]
         try:
             route_table = st.session_state["route_table"]
-            row = route_table[((route_table['Boje1'] == last_b) & (route_table['Boje2'] == st.session_state['next_target'])) |
-                            ((route_table['Boje2'] == last_b) & (route_table['Boje1'] == st.session_state['next_target']))]
+            row = route_table[((route_table['Boje1'] == last_b) & (route_table['Boje2'] == st.session_state['next_target']))]
             if not row.empty:
                 dist = float(row.iloc[0]['Distanz_NM'])
-                crs = float(row.iloc[0]['Richtung_hin_deg']) if row.iloc[0]['Boje1'] == last_b else float(row.iloc[0]['Richtung_zurück_deg'])
-                bs = float(row.iloc[0]['BS_hin_kn']) if row.iloc[0]['Boje1'] == last_b else float(row.iloc[0]['BS_zurück_kn'])
-                t_h = float(row.iloc[0]['Zeit_hin_h']) if row.iloc[0]['Boje1'] == last_b else float(row.iloc[0]['Zeit_zurück_h'])
+                crs = float(row.iloc[0]['COG'])     
+                bs = float(row.iloc[0]['BS_kt'])
+                t_h = float(row.iloc[0]['Zeit_h'])
                 # Tabelle in Streamlit mit Metriken
-                st.metric(f"Distanz zu {st.session_state['next_target']}", f"{dist:.2f} nm")
-                st.metric(f"Kurs zu {st.session_state['next_target']}", f"{int(crs):03d}°")
-                st.metric(f"True Wind Angle (TWA)", f"{int(abs(angle_diff(cur_twd, crs))):03d}°, {chr(8594) if angle_diff(cur_twd, crs)<0 else chr(8592)}")
-                st.metric(f"Theoretische Geschwindigkeit dorthin", f"{bs:.2f} kn")
-                try:
-                    st.metric(f"Theoretische Zeit dorthin", f"{int(t_h):02d}:{int((t_h*60)%60):02d} h")
-                except:
-                    st.metric(f"Theoretische Zeit dorthin", "nan h nan min")
+                with col_left:
+                    if angle_diff(cur_twd, crs)<0:
+                        st.metric(f"True Wind Angle (TWA)", f"{chr(8594)} {int(abs(angle_diff(cur_twd, crs))):03d}°")
+                    else:
+                        st.metric(f"True Wind Angle (TWA)", f"{int(abs(angle_diff(cur_twd, crs))):03d}° {chr(8592)}")
+                    st.metric(f"Kurs zu {st.session_state['next_target']}", f"{int(crs):03d}°")
 
-            else:
+                with col_right:
+                    st.metric(f"Distanz zu {st.session_state['next_target']}", f"{dist:.2f} nm")
+
+            elif st.session_state['next_target'] != last_b:
                 st.warning(f"Keine Route von {last_b} zu {st.session_state['next_target']} in Routentabelle gefunden.")
         except Exception as e:
             st.warning(f"Konnte Distanz/Kurs zur nächsten Boje nicht berechnen: {e}")
 
     # ETA prediction from last log -> next_target
-    if log and st.session_state.get('next_target') and polar_interp is not None and leeway_interp is not None:
+    if log and st.session_state.get('next_target') is not None and polar_interp is not None and leeway_interp is not None:
         last_b, last_t = log[-1]
         try:
-            t0 = datetime.strptime(last_t, "%Y-%m-%d %H:%M")
-            bmap = {row['Name']: (float(row['Breitengrad']), float(row['Längengrad'])) for _, row in buoys_df.iterrows()}
-            dist, course, bs, hours = simulate_leg(bmap, polar_interp, leeway_interp, cur_twd, cur_tws, last_b, st.session_state['next_target'])
+            t0 = datetime.strptime(last_t, "%Y-%m-%d %H:%M:%S")
+            bmap = {row['Name']: (float(row['LAT']), float(row['LON'])) for _, row in buoys_df.iterrows()}
+            dist, heading, bs, hours = simulate_leg(bmap, polar_interp, leeway_interp, cur_twd, cur_tws, last_b, st.session_state['next_target'])
             eta = t0 + timedelta(hours=hours)
-            st.info(f"Prognose ETA an {st.session_state['next_target']}: {eta.strftime('%Y-%m-%d %H:%M')}  (Distanz {dist:.2f} NM, Speed {bs:.2f} kn)")
+            # st.info(f"Prognose ETA an {st.session_state['next_target']}: {eta.strftime('%Y-%m-%d %H:%M:%S')}  (Kurs {int(course):03d}°, Distanz {dist:.2f} NM, Speed {bs:.1f} kn)")
             # Totals
             total_dist = 0.0
             if len(log) >= 2:
@@ -897,8 +938,15 @@ with col_left:
                     a = log[i-1][0]; b = log[i][0]
                     lat1, lon1 = bmap[a]; lat2, lon2 = bmap[b]
                     total_dist += haversine_nm(lat1, lon1, lat2, lon2)
-            st.metric("Bisher gesegelte Distanz", f"{total_dist:.2f} NM")
-            st.metric("Distanz inkl. nächste Boje", f"{(total_dist+dist):.2f} NM")
+            with col_left:
+                st.metric("theoretische Speed", f"{bs:.2f} kn")
+                # benötigte Zeit in HH:MM
+                st.metric("benötigte Zeit", f"{int(hours)}:{int((hours-int(hours))*60):02d} h:min")
+            with col_right:
+                st.metric("Heading zu nächster Boje", f"{int(heading):03d}°")
+                st.metric("Bisher gesegelte Distanz", f"{total_dist:.2f} nm")
+                st.metric("Distanz inkl. nächste Boje", f"{(total_dist+dist):.2f} nm")
+                st.metric("ETA an nächster Boje", eta.strftime("%H:%M:%S"))
         except Exception as e:
             st.warning(f"ETA konnte nicht berechnet werden: {e}")
 
@@ -915,15 +963,15 @@ with col_center:
             st.session_state["route_table"] = compute_route_table(buoys_df, routes_df, polar_interp, leeway_interp, cur_twd, cur_tws)
             route_table = st.session_state.get("route_table")
             log = st.session_state.get('visit_log', [])
-            # select all rows of routetable that contain in Boje1 or Boje2 the next_target and max_Passieren > 0
+            # select all rows of routetable that contain in Boje1 the next_target and max_Passieren > 0
             if st.session_state.get('next_target'):
-                rt = route_table[(route_table['Boje1'] == st.session_state['next_target']) | (route_table['Boje2'] == st.session_state['next_target']) & (route_table['Max_Passieren'] > 0)]
+                rt = route_table[(route_table['Boje1'] == st.session_state['next_target']) & (route_table['Max_Passieren'] > 0)]
                 st.markdown(f"**Routentabelle (nur Routen ab nächster Boje {st.session_state['next_target']})**")
 
             # letze Logeintrag nehmen als Boje
             elif log:
                 last_b = log[-1][0]
-                rt = route_table[(route_table['Boje1'] == last_b) | (route_table['Boje2'] == last_b) & (route_table['Max_Passieren'] > 0)]
+                rt = route_table[(route_table['Boje1'] == last_b) & (route_table['Max_Passieren'] > 0)]
                 st.markdown(f"**Routentabelle (nur Routen ab letzter Boje {last_b})**")
 
             else:
@@ -944,11 +992,14 @@ if buoys_df is not None and routes_df is not None and polar_interp is not None a
     bojes = list(buoys_df['Name'].astype(str).values)
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        start_b = st.selectbox("Start-Boje", options=bojes)
-        start_dt = st.datetime_input("Start-Datum & Zeit", value=datetime.now())
+        start_b = st.selectbox("Start-Boje", options=start_bojes, index=0)
+        start_date = st.date_input("Start-Datum", value=datetime.now())
+        start_dt = datetime.combine(start_date, st.time_input("Start-Zeit", value=datetime.now().time(), step=timedelta(minutes=5)))
     with c2:
-        goal_b = st.selectbox("Ziel-Boje", options=bojes, index=min(1, len(bojes)-1))
-        deadline_dt = st.datetime_input("Ziel-Datum & Zeit (Deadline)", value=datetime.now()+timedelta(hours=12))
+        goal_b = "FINISH"
+        deadline_date = st.date_input("Ziel-Datum", value=(start_date+timedelta(hours=24)))
+        deadline_dt = datetime.combine(deadline_date, st.time_input("Ziel-Zeit", value=(start_dt+timedelta(hours=24)).time(), step=timedelta(minutes=5)))
+        hard_deadline_dt = datetime.combine(deadline_date, st.time_input("Harte Deadline", value=(deadline_dt+timedelta(hours=1)).time(), step=timedelta(minutes=5)))
     with c3:
         max_steps = st.number_input("Max. Schritte pro Variante", min_value=3, max_value=200, value=30)
         restarts = st.number_input("Restarts/Variante", min_value=1, max_value=20, value=5)
@@ -960,13 +1011,11 @@ if buoys_df is not None and routes_df is not None and polar_interp is not None a
     if run_opt:
         # Reload from cache to honor "immer neu einladen"
         app_state = st.session_state.get("app_state", _load_app_state())
-        def load_key(k):
-            info = app_state.get(k)
-            return read_csv_flexible(info['path']) if info and os.path.exists(info['path']) else None
-        buoys_latest = load_key('buoys')
-        routes_latest = load_key('routes')
-        polar_latest = load_key('polar')
-        leeway_latest = load_key('leeway')
+
+        buoys_latest = buoys_df
+        routes_latest = routes_df
+        polar_latest = polar_df
+        leeway_latest = leeway_df
         if buoys_latest is None or routes_latest is None or polar_latest is None or leeway_latest is None:
             st.error("Bitte alle benötigten CSVs hochladen (Bojen, Routen, Polar, Abdrift).")
         else:
@@ -1007,7 +1056,7 @@ if variants:
         st.session_state['highlight_pairs'] = pairs
         if buoys_df is not None and routes_df is not None:
             fmap2 = make_map(buoys_df, routes_df, highlight_pairs=pairs)
-            st_folium(fmap2, width=None, height=500)
+            st_folium(fmap2, width=None, height=500, returned_objects=[], key="map2", zoom=12)
 
     with st.expander("Übersicht aller Varianten (Top-Distanzen nach Abzug)"):
         rows = []
@@ -1058,13 +1107,13 @@ save_dict = st.session_state.get("app_state", {})
 save_dict.update({
     "visit_log": st.session_state.get("visit_log", []),
     "next_target": st.session_state.get("next_target", None),
-    "variants": st.session_state.get("variants", []),
     "selected_variant": st.session_state.get("selected_variant", 0),
     "highlight_pairs": st.session_state.get("highlight_pairs", []),
     "next_possible_targets": st.session_state.get("next_possible_targets", []),
+    # "variants": st.session_state.get("variants", []),
 })
-st.write(save_dict)
+# st.write(save_dict)
 _save_app_state(save_dict)
 
 # write all session state at the bottom for debugging
-st.write(st.session_state)
+# st.write(st.session_state)
