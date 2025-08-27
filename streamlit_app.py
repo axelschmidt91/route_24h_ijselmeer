@@ -851,9 +851,9 @@ with col_left:
             if log:
                 st.table(pd.DataFrame(log, columns=['Boje', 'Zeit']))
 
-            next_targets(routes_df)
-            next_target = st.selectbox("Nächste anzulaufende Boje", options=["(keine)"]+st.session_state["next_possible_targets"])
-            st.session_state['next_target'] = None if next_target == "(keine)" else next_target
+    next_targets(routes_df)
+    next_target = st.selectbox("Nächste anzulaufende Boje", options=["(keine)"]+st.session_state["next_possible_targets"])
+    st.session_state['next_target'] = None if next_target == "(keine)" else next_target
 
     # Give the course and distance to next target
     if log and st.session_state.get('next_target') and st.session_state["route_table"] is not None:
