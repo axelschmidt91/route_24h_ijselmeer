@@ -827,81 +827,81 @@ col_left, col_center = st.columns([1.1, 2.0])
 
 with col_left:
     with st.expander("📝 Log & Nächste Boje"):
-    # st.subheader("Log & Nächste Boje")
-    if buoys_df is not None:
-        # Log state
-        log: List[Tuple[str,str]] = st.session_state.get('visit_log', [])
-        next_targets(routes_df)
-        st.markdown("**Bereits passierte Bojen & Zeiten**")
-        with st.form("logform", clear_on_submit=False):
-            bsel = st.selectbox("Boje", options=st.session_state["next_possible_targets"], index=0 if st.session_state["next_possible_targets"] else None)
-            tsel = st.text_input("Zeit (YYYY-MM-DD HH:MM)", value=datetime.now().strftime("%Y-%m-%d %H:%M"))
-            col_left, col_right = st.columns(2)
-            with col_left:
-                add = st.form_submit_button("➕ Log-Eintrag hinzufügen")
-            with col_right:
-                remove_last = st.form_submit_button("↩️ Letzten Eintrag entfernen")
-        if add:
-            log.append((bsel, tsel))
-            st.session_state['visit_log'] = log
-        if remove_last and log:
-            log.pop()
-            st.session_state['visit_log'] = log
-        # show log
-        if log:
-            st.table(pd.DataFrame(log, columns=['Boje', 'Zeit']))
+        # st.subheader("Log & Nächste Boje")
+        if buoys_df is not None:
+            # Log state
+            log: List[Tuple[str,str]] = st.session_state.get('visit_log', [])
+            next_targets(routes_df)
+            st.markdown("**Bereits passierte Bojen & Zeiten**")
+            with st.form("logform", clear_on_submit=False):
+                bsel = st.selectbox("Boje", options=st.session_state["next_possible_targets"], index=0 if st.session_state["next_possible_targets"] else None)
+                tsel = st.text_input("Zeit (YYYY-MM-DD HH:MM)", value=datetime.now().strftime("%Y-%m-%d %H:%M"))
+                col_left, col_right = st.columns(2)
+                with col_left:
+                    add = st.form_submit_button("➕ Log-Eintrag hinzufügen")
+                with col_right:
+                    remove_last = st.form_submit_button("↩️ Letzten Eintrag entfernen")
+            if add:
+                log.append((bsel, tsel))
+                st.session_state['visit_log'] = log
+            if remove_last and log:
+                log.pop()
+                st.session_state['visit_log'] = log
+            # show log
+            if log:
+                st.table(pd.DataFrame(log, columns=['Boje', 'Zeit']))
 
-        next_targets(routes_df)
-        next_target = st.selectbox("Nächste anzulaufende Boje", options=["(keine)"]+st.session_state["next_possible_targets"])
-        st.session_state['next_target'] = None if next_target == "(keine)" else next_target
+            next_targets(routes_df)
+            next_target = st.selectbox("Nächste anzulaufende Boje", options=["(keine)"]+st.session_state["next_possible_targets"])
+            st.session_state['next_target'] = None if next_target == "(keine)" else next_target
 
-        # Give the course and distance to next target
-        if log and st.session_state.get('next_target') and st.session_state["route_table"] is not None:
-            last_b, last_t = log[-1]
-            try:
-                route_table = st.session_state["route_table"]
-                row = route_table[((route_table['Boje1'] == last_b) & (route_table['Boje2'] == st.session_state['next_target'])) |
-                                  ((route_table['Boje2'] == last_b) & (route_table['Boje1'] == st.session_state['next_target']))]
-                if not row.empty:
-                    dist = float(row.iloc[0]['Distanz_NM'])
-                    crs = float(row.iloc[0]['Richtung_hin_deg']) if row.iloc[0]['Boje1'] == last_b else float(row.iloc[0]['Richtung_zurück_deg'])
-                    bs = float(row.iloc[0]['BS_hin_kn']) if row.iloc[0]['Boje1'] == last_b else float(row.iloc[0]['BS_zurück_kn'])
-                    t_h = float(row.iloc[0]['Zeit_hin_h']) if row.iloc[0]['Boje1'] == last_b else float(row.iloc[0]['Zeit_zurück_h'])
-                    # Tabelle in Streamlit mit Metriken
-                    st.metric(f"Distanz zu {st.session_state['next_target']}", f"{dist:.2f} nm")
-                    st.metric(f"Kurs zu {st.session_state['next_target']}", f"{int(crs):03d}°")
-                    st.metric(f"True Wind Angle (TWA)", f"{int(abs(angle_diff(cur_twd, crs))):03d}°, {chr(8594) if angle_diff(cur_twd, crs)<0 else chr(8592)}")
-                    st.metric(f"Theoretische Geschwindigkeit dorthin", f"{bs:.2f} kn")
-                    try:
-                        st.metric(f"Theoretische Zeit dorthin", f"{int(t_h):02d}:{int((t_h*60)%60):02d} h")
-                    except:
-                        st.metric(f"Theoretische Zeit dorthin", "nan h nan min")
+    # Give the course and distance to next target
+    if log and st.session_state.get('next_target') and st.session_state["route_table"] is not None:
+        last_b, last_t = log[-1]
+        try:
+            route_table = st.session_state["route_table"]
+            row = route_table[((route_table['Boje1'] == last_b) & (route_table['Boje2'] == st.session_state['next_target'])) |
+                            ((route_table['Boje2'] == last_b) & (route_table['Boje1'] == st.session_state['next_target']))]
+            if not row.empty:
+                dist = float(row.iloc[0]['Distanz_NM'])
+                crs = float(row.iloc[0]['Richtung_hin_deg']) if row.iloc[0]['Boje1'] == last_b else float(row.iloc[0]['Richtung_zurück_deg'])
+                bs = float(row.iloc[0]['BS_hin_kn']) if row.iloc[0]['Boje1'] == last_b else float(row.iloc[0]['BS_zurück_kn'])
+                t_h = float(row.iloc[0]['Zeit_hin_h']) if row.iloc[0]['Boje1'] == last_b else float(row.iloc[0]['Zeit_zurück_h'])
+                # Tabelle in Streamlit mit Metriken
+                st.metric(f"Distanz zu {st.session_state['next_target']}", f"{dist:.2f} nm")
+                st.metric(f"Kurs zu {st.session_state['next_target']}", f"{int(crs):03d}°")
+                st.metric(f"True Wind Angle (TWA)", f"{int(abs(angle_diff(cur_twd, crs))):03d}°, {chr(8594) if angle_diff(cur_twd, crs)<0 else chr(8592)}")
+                st.metric(f"Theoretische Geschwindigkeit dorthin", f"{bs:.2f} kn")
+                try:
+                    st.metric(f"Theoretische Zeit dorthin", f"{int(t_h):02d}:{int((t_h*60)%60):02d} h")
+                except:
+                    st.metric(f"Theoretische Zeit dorthin", "nan h nan min")
 
-                else:
-                    st.warning(f"Keine Route von {last_b} zu {st.session_state['next_target']} in Routentabelle gefunden.")
-            except Exception as e:
-                st.warning(f"Konnte Distanz/Kurs zur nächsten Boje nicht berechnen: {e}")
+            else:
+                st.warning(f"Keine Route von {last_b} zu {st.session_state['next_target']} in Routentabelle gefunden.")
+        except Exception as e:
+            st.warning(f"Konnte Distanz/Kurs zur nächsten Boje nicht berechnen: {e}")
 
-        # ETA prediction from last log -> next_target
-        if log and st.session_state.get('next_target') and polar_interp is not None and leeway_interp is not None:
-            last_b, last_t = log[-1]
-            try:
-                t0 = datetime.strptime(last_t, "%Y-%m-%d %H:%M")
-                bmap = {row['Name']: (float(row['Breitengrad']), float(row['Längengrad'])) for _, row in buoys_df.iterrows()}
-                dist, course, bs, hours = simulate_leg(bmap, polar_interp, leeway_interp, cur_twd, cur_tws, last_b, st.session_state['next_target'])
-                eta = t0 + timedelta(hours=hours)
-                st.info(f"Prognose ETA an {st.session_state['next_target']}: {eta.strftime('%Y-%m-%d %H:%M')}  (Distanz {dist:.2f} NM, Speed {bs:.2f} kn)")
-                # Totals
-                total_dist = 0.0
-                if len(log) >= 2:
-                    for i in range(1, len(log)):
-                        a = log[i-1][0]; b = log[i][0]
-                        lat1, lon1 = bmap[a]; lat2, lon2 = bmap[b]
-                        total_dist += haversine_nm(lat1, lon1, lat2, lon2)
-                st.metric("Bisher gesegelte Distanz", f"{total_dist:.2f} NM")
-                st.metric("Distanz inkl. nächste Boje", f"{(total_dist+dist):.2f} NM")
-            except Exception as e:
-                st.warning(f"ETA konnte nicht berechnet werden: {e}")
+    # ETA prediction from last log -> next_target
+    if log and st.session_state.get('next_target') and polar_interp is not None and leeway_interp is not None:
+        last_b, last_t = log[-1]
+        try:
+            t0 = datetime.strptime(last_t, "%Y-%m-%d %H:%M")
+            bmap = {row['Name']: (float(row['Breitengrad']), float(row['Längengrad'])) for _, row in buoys_df.iterrows()}
+            dist, course, bs, hours = simulate_leg(bmap, polar_interp, leeway_interp, cur_twd, cur_tws, last_b, st.session_state['next_target'])
+            eta = t0 + timedelta(hours=hours)
+            st.info(f"Prognose ETA an {st.session_state['next_target']}: {eta.strftime('%Y-%m-%d %H:%M')}  (Distanz {dist:.2f} NM, Speed {bs:.2f} kn)")
+            # Totals
+            total_dist = 0.0
+            if len(log) >= 2:
+                for i in range(1, len(log)):
+                    a = log[i-1][0]; b = log[i][0]
+                    lat1, lon1 = bmap[a]; lat2, lon2 = bmap[b]
+                    total_dist += haversine_nm(lat1, lon1, lat2, lon2)
+            st.metric("Bisher gesegelte Distanz", f"{total_dist:.2f} NM")
+            st.metric("Distanz inkl. nächste Boje", f"{(total_dist+dist):.2f} NM")
+        except Exception as e:
+            st.warning(f"ETA konnte nicht berechnet werden: {e}")
 
 with col_center:
     st.subheader("Karte & Routentabelle")
