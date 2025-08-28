@@ -625,7 +625,6 @@ class OptimizationEngine:
         else:
             initial_route = RoutingPath([RoutingPoint(start, self.start_time)])
 
-        st.write(f"**Pfadberechnung von {start} nach {end}**")
         shortest = self.find_shortest_path(start, end)
         # Copy logged_route to avoid mutation and append shortest path if exists
         if logged_route:
@@ -642,7 +641,6 @@ class OptimizationEngine:
             )
             arrival = shortest_route.last_point().time + timedelta(hours=hours)
             shortest_route.add_point(RoutingPoint(node, arrival))
-        st.write(f"Kürzester Pfad mit ETA: {shortest_route=}")
 
         # add shortest path if valid
         if shortest_route.check_validity(self.routes):
@@ -656,6 +654,8 @@ class OptimizationEngine:
         # recalculate the ETA for the new RoutingPath.
         # check if the new RoutingPath is valid and if so, add it to the list of routes to finish.
         flag_abort = False
+        time_limit = 10
+        start_time = datetime.now()
 
         while not flag_abort:
             current_path = random.choice(routes_to_finish)
@@ -672,13 +672,22 @@ class OptimizationEngine:
             neighbors_a = set(self.graph.get(a, []))
             neighbors_b = set(self.graph.get(b, []))
             common_neighbors = list(neighbors_a.intersection(neighbors_b))
+
             if not common_neighbors:
                 continue
             # pick a random common neighbor to insert
             new_node = random.choice(common_neighbors)
             # create new path with inserted node
             new_path = RoutingPath(current_path.points[:idx2])
-            # calculate ETA for new_path for all points
+            # add new node with ETA
+            dist, heading, bs, hours = RouteEngine.simulate_leg(
+                self.bmap, self.polar, self.leeway,
+                self.twd, self.tws,
+                new_path.last_point().get_name(), new_node
+            )
+            arrival = new_path.last_point().time + timedelta(hours=hours)
+            new_path.add_point(RoutingPoint(new_node, arrival))
+            # calculate new ETA for new_path for all following points
             for i in range(idx2, len(current_path.points)):
                 prev_point = new_path.last_point()
                 next_point_name = current_path.points[i].get_name()
@@ -689,15 +698,20 @@ class OptimizationEngine:
                 )
                 arrival = prev_point.time + timedelta(hours=hours)
                 new_path.add_point(RoutingPoint(next_point_name, arrival))
-
             # check validity
             if new_path.check_validity(self.routes):
+                # check if ETA last point is before deadline
+                if new_path.last_point() and new_path.last_point().time > self.deadline:
+                    continue
                 # check if new_path is already in routes_to_finish
                 if all(new_path.to_tuples() != p.to_tuples() for p in routes_to_finish):
                     routes_to_finish.append(new_path)
-                    st.write(f"Neuer Pfad gefunden: {new_path=}")
-            if len(routes_to_finish) >= 50:  # limit to 50 paths for performance
+            if len(routes_to_finish) >= 100:  # limit to 50 paths for performance
                 flag_abort = True
+
+            if (datetime.now() - start_time).total_seconds() > time_limit:
+                flag_abort = True
+                st.write("Zeitlimit für Pfadberechnung erreicht.")
 
         # check all paths for deadline
         longer_paths = []
@@ -706,7 +720,6 @@ class OptimizationEngine:
                 finishing_time = path.calc_finishing_time()
                 if finishing_time and finishing_time <= self.deadline:
                     longer_paths.append(path)
-
         return longer_paths
         
     def evaluate_paths(self, paths: List[RoutingPath], n_best=10) -> List[Tuple[RoutingPath, float, datetime]]:
@@ -942,9 +955,9 @@ class UIApp:
         right.subheader("Polar & Abdrift Diagramme")
         tws_slider = right.slider("TWS für Diagramme [kn]", min_value=0.0, max_value=40.0, value=float(cur_tws), step=0.5)
         if self.polar_df is not None:
-            right.plotly_chart(PlotEngine.plot_polar(self.polar_df, tws_slider), use_container_width=True)
+            right.plotly_chart(PlotEngine.plot_polar(self.polar_df, tws_slider), width='stretch')
         if self.leeway_df is not None:
-            right.plotly_chart(PlotEngine.plot_leeway(self.leeway_df, tws_slider), use_container_width=True)
+            right.plotly_chart(PlotEngine.plot_leeway(self.leeway_df, tws_slider), width='stretch')
 
         return cur_twd, cur_tws, tws_slider
 
@@ -1079,10 +1092,10 @@ class UIApp:
                         c1, c2 = st.columns(2)
                         with c1:
                             start_time = st.text_input("Startzeit (YYYY-MM-DD HH:MM:SS)", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                            finish_open = st.text_input("Finish Öffnungszeit (YYYY-MM-DD HH:MM:SS)", value=(datetime.now() + timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S"))
+                            finish_open = st.text_input("Finish Öffnungszeit (YYYY-MM-DD HH:MM:SS)", value=(datetime.now() + timedelta(hours=23)).strftime("%Y-%m-%d %H:%M:%S"))
                         with c2:
-                            finish_point = st.text_input("Finish Sollzeit (YYYY-MM-DD HH:MM:SS)", value=(datetime.now() + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S"))
-                            deadline = st.text_input("Deadline Zeit (YYYY-MM-DD HH:MM:SS)", value=(datetime.now() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"))
+                            finish_point = st.text_input("Finish Sollzeit (YYYY-MM-DD HH:MM:SS)", value=(datetime.now() + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S"))
+                            deadline = st.text_input("Deadline Zeit (YYYY-MM-DD HH:MM:SS)", value=(datetime.now() + timedelta(hours=25)).strftime("%Y-%m-%d %H:%M:%S"))
                         n_best = st.number_input("Anzahl beste Routen anzeigen", min_value=1, max_value=20, value=5, step=1)
 
                         # Button to set these values in session_state
@@ -1156,7 +1169,7 @@ class UIApp:
                                     "Finishing Time": fin_time.strftime("%Y-%m-%d %H:%M:%S") if fin_time else "N/A"
                                 })
                             df_opt = pd.DataFrame(opt_results)
-                            st.dataframe(df_opt, use_container_width=True)
+                            st.dataframe(df_opt, width='stretch')
 
                             # Auswahl der besten Route
                             sel_idx = st.number_input("Welche Route hervorheben?", min_value=1, max_value=len(best_paths), value=1, step=1)
