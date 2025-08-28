@@ -617,6 +617,7 @@ class OptimizationEngine:
 
     def find_longer_paths(self, start: str, end: str, logged_route: Optional[RoutingPath], next_target: Optional[str]) -> List[RoutingPath]:
         
+        routes_to_finish = []
 
         if logged_route:
             initial_route = logged_route
@@ -629,80 +630,84 @@ class OptimizationEngine:
         # Copy logged_route to avoid mutation and append shortest path if exists
         if logged_route:
             shortest_route = logged_route.copy()
-            for node in shortest[1:]:  # skip start as it's already in logged_route
-                # use RouteEngine.simulate_leg to get ETA
-                dist, heading, bs, hours = RouteEngine.simulate_leg(
-                    self.bmap, self.polar, self.leeway,
-                    self.twd, self.tws,
-                    shortest_route.last_point().get_name(), node
-                )
-                arrival = shortest_route.last_point().time + timedelta(hours=hours)
-                shortest_route.add_point(RoutingPoint(node, arrival))
-            st.write(f"Kürzester Pfad mit ETA: {shortest_route=}")
+        else:
+            shortest_route = RoutingPath([RoutingPoint(start, self.start_time)])
 
-
-        if next_target:
+        for node in shortest[1:]:  # skip start as it's already in logged_route
+            # use RouteEngine.simulate_leg to get ETA
             dist, heading, bs, hours = RouteEngine.simulate_leg(
                 self.bmap, self.polar, self.leeway,
                 self.twd, self.tws,
-                initial_route.last_point().get_name(), next_target
+                shortest_route.last_point().get_name(), node
             )
-            arrival = initial_route.last_point().time + timedelta(hours=hours)
-            if arrival > self.deadline:
-                st.warning(f"Nächste Boje {next_target} kann nicht vor der Deadline {self.deadline} erreicht werden (ETA: {arrival}).")
-                return []
-            initial_route.add_point(RoutingPoint(next_target, arrival))
-            start = next_target
+            arrival = shortest_route.last_point().time + timedelta(hours=hours)
+            shortest_route.add_point(RoutingPoint(node, arrival))
+        st.write(f"Kürzester Pfad mit ETA: {shortest_route=}")
 
-        # calculate for each waypoint the ETA with RouteEngine.simulate_leg
-        # check if the ETA is before the deadline, if not, discard the path
-        # check if the path is valid according to routes_df and Max_Passieren
-        depth_limit = 10  # to prevent infinite recursion
-        time_limit_calculation = 1  # seconds
-        start_time = datetime.now()
-        flag_time_limit_reached = False
-        count_calculations = 0
-        all_calcs = []
+        # add shortest path if valid
+        if shortest_route.check_validity(self.routes):
+            routes_to_finish.append(shortest_route)
+        else:
+            st.warning("Kürzester Pfad ist ungültig (Routenbeschränkungen).")
+            return []
 
+        # pick random path from routes to finish and explore variations.
+        # pick two RoutingPoints that are not start or end and are next to each other. find buoys that are connected to both buoys and insert them in between.
+        # recalculate the ETA for the new RoutingPath.
+        # check if the new RoutingPath is valid and if so, add it to the list of routes to finish.
+        flag_abort = False
 
-        def dfs(current: str, path: RoutingPath, all_paths: List[RoutingPath], depth: int):
-            nonlocal flag_time_limit_reached, count_calculations
-            count_calculations += 1
-            # Time limit check
-            if (datetime.now() - start_time).total_seconds() > time_limit_calculation:
-                flag_time_limit_reached = True
-                return
-            if path.check_validity(self.routes):
-                all_calcs.append(path.copy())
-                if current == end:
-                    all_paths.append(path.copy())
-                    return
-                if depth < depth_limit:
-                    for neighbor in sorted(self.graph.get(current, []), key=lambda k: random.random()):
-                            if neighbor == []:
-                                continue
-                            last_point = path.last_point()
-                            dist, heading, bs, hours = RouteEngine.simulate_leg(
-                                self.bmap, self.polar, self.leeway,
-                                self.twd, self.tws,
-                                last_point.get_name(), neighbor
-                            )
-                            arrival = last_point.time + timedelta(hours=hours)
-                            if arrival > self.deadline:
-                                continue
-                            path.add_point(RoutingPoint(neighbor, arrival))
-                            dfs(neighbor, path, all_paths, depth=depth+1)
-                            path.remove_last_point()
-        all_paths = []
-        dfs(start, initial_route, all_paths, depth=0)
-        if flag_time_limit_reached:
-            with st.expander("⚠️ Zeitlimit für Pfadberechnung erreicht"):
-                st.write(f"Zeitlimit für Pfadberechnung von {time_limit_calculation} Sekunden erreicht. Ergebnisse unvollständig. Berechnete Pfade: {len(all_paths)}, Versuche: {count_calculations}")
-                # output all_calcs in json format for debugging
-                st.write(f"Alle berechneten Pfade (unabhängig von Gültigkeit und Ziel): {len(all_calcs)}")
-                for p in all_calcs[:20]:
-                    st.write(p.to_tuples())
-        return all_paths
+        while not flag_abort:
+            current_path = random.choice(routes_to_finish)
+
+            if len(current_path.points) < 3:
+                # not enough points to modify, skip
+                continue
+            # pick two random indices that are not the first or last point
+            idx1 = random.randint(1, len(current_path.points) - 2)
+            idx2 = idx1 + 1
+            a = current_path.points[idx1].get_name()
+            b = current_path.points[idx2].get_name()
+            # find common neighbors
+            neighbors_a = set(self.graph.get(a, []))
+            neighbors_b = set(self.graph.get(b, []))
+            common_neighbors = list(neighbors_a.intersection(neighbors_b))
+            if not common_neighbors:
+                continue
+            # pick a random common neighbor to insert
+            new_node = random.choice(common_neighbors)
+            # create new path with inserted node
+            new_path = RoutingPath(current_path.points[:idx2])
+            # calculate ETA for new_path for all points
+            for i in range(idx2, len(current_path.points)):
+                prev_point = new_path.last_point()
+                next_point_name = current_path.points[i].get_name()
+                dist, heading, bs, hours = RouteEngine.simulate_leg(
+                    self.bmap, self.polar, self.leeway,
+                    self.twd, self.tws,
+                    prev_point.get_name(), next_point_name
+                )
+                arrival = prev_point.time + timedelta(hours=hours)
+                new_path.add_point(RoutingPoint(next_point_name, arrival))
+
+            # check validity
+            if new_path.check_validity(self.routes):
+                # check if new_path is already in routes_to_finish
+                if all(new_path.to_tuples() != p.to_tuples() for p in routes_to_finish):
+                    routes_to_finish.append(new_path)
+                    st.write(f"Neuer Pfad gefunden: {new_path=}")
+            if len(routes_to_finish) >= 50:  # limit to 50 paths for performance
+                flag_abort = True
+
+        # check all paths for deadline
+        longer_paths = []
+        for path in routes_to_finish:
+            if path.last_point() and path.last_point().name == "FINISH":
+                finishing_time = path.calc_finishing_time()
+                if finishing_time and finishing_time <= self.deadline:
+                    longer_paths.append(path)
+
+        return longer_paths
         
     def evaluate_paths(self, paths: List[RoutingPath], n_best=10) -> List[Tuple[RoutingPath, float, datetime]]:
         # return top n_best paths sorted by calculated_distance (with penalty) descending
