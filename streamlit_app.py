@@ -42,7 +42,7 @@ import gpxpy
 # ------------------------------- Constants -------------------------------------------
 
 APP_STATE_PATH = "./app_state.json"
-CACHE_DIR = "./data_cache"
+CACHE_DIR = "./.data_cache"
 ICON_ARROW_PATH = "icons/arrow_left.png"
 EARTH_RADIUS_NM = 3440.065  # Nautical miles
 
@@ -812,10 +812,9 @@ class UIApp:
             next_target = st.selectbox("Nächste anzulaufende Boje", options=["(keine)"] + st.session_state.get("next_possible_targets", []))
             st.session_state['next_target'] = next_target if next_target != "(keine)" else None
 
-            st.subheader(f"Route von {log[-1][0] if log else '(Start)'} → {st.session_state['next_target'] if st.session_state.get('next_target') else '(keine)'}")
-
             # Kennzahlen zur nächsten Boje
             log = st.session_state.get('visit_log', [])
+            st.subheader(f"Route von {log[-1][0] if log else '(Start)'} → {st.session_state['next_target'] if st.session_state.get('next_target') else '(keine)'}")
             c1, c2 = st.columns(2)
             if log and st.session_state.get('next_target') is not None and st.session_state.get("route_table") is not None:
                 last_b, last_t = log[-1]
