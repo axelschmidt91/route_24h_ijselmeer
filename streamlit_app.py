@@ -28,6 +28,7 @@ import random
 import hashlib
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
+import random
 
 import numpy as np
 import pandas as pd
@@ -203,11 +204,11 @@ class DataLoader:
             # Startbojen extrahieren (wie im Original)
             start_bojes = []
             for i, row in df.iterrows():
-                if pd.isna(row[0]) or pd.isna(row[1]):
+                if pd.isna(row.iloc[0]) or pd.isna(row.iloc[1]):
                     break
                 if i == 0:
                     continue  # skip header
-                start_bojes.append(str(row[0]))
+                start_bojes.append(str(row.iloc[0]))
 
             # Clean & Normalize
             df = df.dropna(subset=[df.columns[0], df.columns[1]])
@@ -369,8 +370,8 @@ class RouteEngine:
 
         rows = []
         for _, r in routes.iterrows():
-            b1, b2 = str(r[0]), str(r[1])
-            passes = int(r[2]) if len(r) > 2 and not pd.isna(r[2]) else 999999
+            b1, b2 = str(r.iloc[0]), str(r.iloc[1])
+            passes = int(r.iloc[2]) if len(r) > 2 and not pd.isna(r.iloc[2]) else 999999
             if b1 not in bmap or b2 not in bmap:
                 continue
             lat1, lon1 = bmap[b1]; lat2, lon2 = bmap[b2]
@@ -435,7 +436,7 @@ class RouteEngine:
     def route_graph(routes: pd.DataFrame) -> Dict[str, List[str]]:
         g: Dict[str, List[str]] = {}
         for _, r in routes.iterrows():
-            a, b = str(r[0]), str(r[1])
+            a, b = str(r.iloc[0]), str(r.iloc[1])
             g.setdefault(a, []).append(b)
             g.setdefault(b, []).append(a)
         return g
@@ -462,101 +463,232 @@ class RouteEngine:
         bs = RouteEngine.interpolate_speed(polar, tws, twa) * math.cos(math.radians(leeway_deg))
         hours = dist / bs if bs > 0 else float('inf')
         return dist, heading, bs, hours
+    
+
+class RoutingPoint:
+    def __init__(self, name: str, arrival: datetime):
+        if not isinstance(arrival, datetime):
+            raise ValueError("arrival must be a datetime object")
+        self.name = name
+        self.time = arrival
+
+    def to_tuple(self) -> Tuple[str, datetime]:
+        return (self.name, self.time)
+    
+    def get_name(self) -> str:
+        return self.name
+    
+    def get_time(self) -> datetime:
+        return self.time
+    
+    def __repr__(self) -> str:
+        return f"{self.name}({self.time.strftime('%Y-%m-%d %H:%M:%S')})"
+    
+class RoutingPath:
+    bmap: Dict[str, Tuple[float, float]] = {}
+    def __init__(self, points: List[RoutingPoint]):
+        self.points = points
+        self.total_distance = 0.0  # to be calculated later
+        self.FinishingTime = None  # to be set later
+        self.calculated_distance = 0.0  # to be calculated later
+
+    def last_point(self) -> RoutingPoint:
+        return self.points[-1] if self.points else None
+
+    def to_tuples(self) -> List[Tuple[str, datetime]]:
+        if not self.points:
+            return []
+        return [p.to_tuple() for p in self.points]
+    
+    def add_point(self, point: RoutingPoint) -> None:
+        self.points.append(point)
+
+    def remove_last_point(self) -> None:
+        if self.points:
+            self.points.pop()
+    
+    def copy(self) -> 'RoutingPath':
+        return RoutingPath(self.points.copy())
+
+    def set_bmap(self, bmap: Dict[str, Tuple[float, float]]) -> None:
+        RoutingPath.bmap = bmap
+    
+    def check_validity(self, routes_df: pd.DataFrame) -> bool:
+        # Check if all legs are valid according to routes_df and Max_Passieren
+        # take copy of routes_df to decrement Max_Passieren as we use legs
+        route_limits = {}
+        for _, r in routes_df.iterrows():
+            a, b = str(r.iloc[0]), str(r.iloc[1])
+            passes = int(r.iloc[2]) if len(r) > 2 and not pd.isna(r.iloc[2]) else 999999
+            route_limits[(a, b)] = passes
+            route_limits[(b, a)] = passes
+        for i in range(1, len(self.points)):
+            a = self.points[i-1].name
+            b = self.points[i].name
+            if (a, b) not in route_limits or route_limits[(a, b)] <= 0 or route_limits[(b, a)] <= 0:
+                return False
+            route_limits[(a, b)] -= 1
+            route_limits[(b, a)] -= 1
+        return True
+    
+    def calc_total_distance(self) -> float:
+        total = 0.0
+        for i in range(1, len(self.points)):
+            a = self.points[i-1].name
+            b = self.points[i].name
+            if a in self.bmap and b in self.bmap:
+                lat1, lon1 = self.bmap[a]; lat2, lon2 = self.bmap[b]
+                dist = Geo.haversine_nm(lat1, lon1, lat2, lon2)
+                total += dist
+        self.calculated_distance = total
+        return total
+    
+    def calc_finishing_time(self) -> Optional[datetime]:
+        if self.points:
+            self.FinishingTime = self.points[-1].time
+            return self.FinishingTime
+        return None
+    
+    def calc_calculated_distance(self, minute_penalty: float) -> float:
+        # calculated_distance = total_distance - penalty
+        # penalty = (minutes_late / 750) * total_distance
+        # => calculated_distance = total_distance * (1 - minutes_late / 750)
+        self.calc_total_distance()  # ensure calculated_distance is set
+        if self.calculated_distance > 0 and minute_penalty > 0:
+            factor = max(0.0, 1.0 - minute_penalty / 750.0)
+            return self.calculated_distance * factor
+        return self.calculated_distance
+    
+    def __repr__(self) -> str:
+        return f"RoutingPath({self.points})"
+        return " -> ".join([f"{p.name}({p.time.strftime('%Y-%m-%d %H:%M')})" for p in self.points])
+
+    
+
+class OptimizationEngine:
+    # 1. Calculate all possible permutations of routing variants that leed from start to finish
+    # Start can be defined in advance or the log and the next target is the beginning of the routing variant
+    # 2. Calculate the ETA at each waypoint of each routing variant. The ETA is calculated based on the polar and leeway data, as well as the current wind conditions (TWD, TWS).
+    # 3. There Are 3 times to be considered: 1. finish opening time, 2. finish point time, 3. deadline time.
+    # If any ETA is later than the deadline time, the routing variant is invalid.
+    # The routing should finish at the buoye "FINISH" after the finish opening time and before the deadline time.
+    # betwenn the finish opening time and the finish point time, there is no penaulty.
+    # after the finish point time, there is a penaulty of minutes later than the finish point time / 750 * sailed distance in nm. This penaulty will be subtracted from your total distance.
+    # 5. goal is to maximize the total distance sailed within the time frame.
+    
+    def __init__(self, buoys: pd.DataFrame, routes: pd.DataFrame, polar: BilinearTable, leeway: BilinearTable):
+        self.buoys = buoys
+        self.routes = routes
+        self.polar = polar
+        self.leeway = leeway
+        self.bmap = {row['Name']: (float(row['LAT']), float(row['LON'])) for _, row in buoys.iterrows()}
+        self.graph = RouteEngine.route_graph(routes)
+        RoutingPath.bmap = self.bmap  # set static bmap for RoutingPath
+    
+    def set_wind(self, twd: float, tws: float):
+        self.twd = twd
+        self.tws = tws
+
+    def set_timeframe(self, start_time: datetime, finish_open: datetime, finish_point: datetime, deadline: datetime):
+        self.start_time = start_time
+        self.finish_open = finish_open
+        self.finish_point = finish_point
+        self.deadline = deadline
 
     @staticmethod
-    def optimize_variants(
-        buoys: pd.DataFrame, routes: pd.DataFrame, polar: BilinearTable, leeway: BilinearTable,
-        start_b: str, goal_b: str, start_dt: datetime, deadline_dt: datetime,
-        twd: float, tws: float, passed: List[Tuple[str, datetime]], next_target: Optional[str],
-        n_variants: int = 10, max_steps: int = 30, restarts: int = 5
-    ) -> List[dict]:
-        bmap = {row['Name']: (float(row['LAT']), float(row['LON'])) for _, row in buoys.iterrows()}
+    def log_to_routing_points(log: List[Tuple[str, str]]) -> RoutingPath:
+        return RoutingPath([RoutingPoint(name, datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")) for name, time_str in log])
+    
 
-        # Limits
-        limit_map: Dict[Tuple[str, str], int] = {}
-        for _, r in routes.iterrows():
-            a, b = str(r[0]), str(r[1])
-            lim = int(r[2]) if len(r) > 2 and not pd.isna(r[2]) else 999999
-            key = tuple(sorted([a, b]))
-            limit_map[key] = lim
+    def find_all_paths(self, start: str, end: str, logged_route: Optional[RoutingPath], next_target: Optional[str]) -> List[RoutingPath]:
+        
+        if logged_route:
+            initial_route = logged_route
+            start = logged_route.last_point().get_name() if logged_route.last_point() else start
+        else:
+            initial_route = RoutingPath([RoutingPoint(start, self.start_time)])
 
-        # Bereits genutzte Kanten abziehen
-        for i in range(1, len(passed)):
-            a = passed[i-1][0]; b = passed[i][0]
-            key = tuple(sorted([a, b]))
-            if key in limit_map:
-                limit_map[key] = max(0, limit_map[key] - 1)
+        if next_target:
+            dist, heading, bs, hours = RouteEngine.simulate_leg(
+                self.bmap, self.polar, self.leeway,
+                self.twd, self.tws,
+                initial_route.last_point().get_name(), next_target
+            )
+            arrival = initial_route.last_point().time + timedelta(hours=hours)
+            if arrival > self.deadline:
+                st.warning(f"Nächste Boje {next_target} kann nicht vor der Deadline {self.deadline} erreicht werden (ETA: {arrival}).")
+                return []
+            initial_route.add_point(RoutingPoint(next_target, arrival))
+            start = next_target
 
-        g = RouteEngine.route_graph(routes)
+        # calculate for each waypoint the ETA with RouteEngine.simulate_leg
+        # check if the ETA is before the deadline, if not, discard the path
+        # check if the path is valid according to routes_df and Max_Passieren
+        depth_limit = 10  # to prevent infinite recursion
+        time_limit_calculation = 20  # seconds
+        start_time = datetime.now()
+        flag_time_limit_reached = False
+        count_calculations = 0
+        all_calcs = []
 
-        def penalty(distance_nm: float, arrival: datetime) -> float:
-            if arrival <= deadline_dt:
-                return 0.0
-            delta_min = (arrival - deadline_dt).total_seconds() / 60.0
-            return distance_nm * (delta_min / 750.0)
 
-        start_node = start_b
-        current_time0 = start_dt
-        variants: List[dict] = []
-
-        for _v in range(n_variants):
-            best_plan = None
-            for _ in range(restarts):
-                node = start_node
-                tcur = current_time0
-                plan = [node]
-                times = [tcur]
-                dist_sum = 0.0
-                limits_left = dict(limit_map)
-                bias_target = next_target
-
-                for step in range(max_steps):
-                    nbrs = [n for n in g.get(node, []) if limits_left.get(tuple(sorted([node, n])), 0) > 0]
-                    if not nbrs:
-                        break
-                    scores = []
-                    for nb in nbrs:
-                        dist, course, bs, hours = RouteEngine.simulate_leg(bmap, polar, leeway, twd, tws, node, nb)
-                        if not math.isfinite(hours):
-                            sc = -1e9
-                        else:
-                            sc = dist
-                            if nb == goal_b:
-                                sc += 0.2 * dist
-                            if bias_target and nb == bias_target:
-                                sc += 0.1 * dist
-                            sc += max(0.0, bs - 3.0)
-                            sc *= (0.9 + 0.2 * random.random())
-                        scores.append((sc, nb, dist, hours))
-                    scores.sort(reverse=True)
-                    topk = scores[:min(3, len(scores))]
-                    _, nb, dist, hours = random.choice(topk)
-
-                    plan.append(nb)
-                    tcur = tcur + timedelta(hours=hours)
-                    times.append(tcur)
-                    dist_sum += dist
-                    key = tuple(sorted([node, nb]))
-                    limits_left[key] = limits_left.get(key, 0) - 1
-                    node = nb
-                    if node == goal_b and random.random() < 0.6:
-                        break
-
-                arr = times[-1]
-                dist_after_penalty = dist_sum - penalty(dist_sum, arr)
-                cand = {
-                    'plan': plan, 'times': times,
-                    'distance_nm': dist_sum,
-                    'arrival': arr,
-                    'score_nm': dist_after_penalty
-                }
-                if (best_plan is None) or (cand['score_nm'] > best_plan['score_nm']):
-                    best_plan = cand
-            variants.append(best_plan)
-
-        variants.sort(key=lambda x: x['score_nm'], reverse=True)
-        return variants
-
+        def dfs(current: str, path: RoutingPath, all_paths: List[RoutingPath], depth: int):
+            nonlocal flag_time_limit_reached, count_calculations
+            count_calculations += 1
+            # Time limit check
+            if (datetime.now() - start_time).total_seconds() > time_limit_calculation:
+                flag_time_limit_reached = True
+                return
+            if path.check_validity(self.routes):
+                all_calcs.append(path.copy())
+                if current == end:
+                    all_paths.append(path.copy())
+                    return
+                if depth < depth_limit:
+                    for neighbor in sorted(self.graph.get(current, []), key=lambda k: random.random()):
+                            if neighbor == []:
+                                continue
+                            last_point = path.last_point()
+                            dist, heading, bs, hours = RouteEngine.simulate_leg(
+                                self.bmap, self.polar, self.leeway,
+                                self.twd, self.tws,
+                                last_point.get_name(), neighbor
+                            )
+                            arrival = last_point.time + timedelta(hours=hours)
+                            if arrival > self.deadline:
+                                continue
+                            path.add_point(RoutingPoint(neighbor, arrival))
+                            dfs(neighbor, path, all_paths, depth=depth+1)
+                            path.remove_last_point()
+        all_paths = []
+        dfs(start, initial_route, all_paths, depth=0)
+        if flag_time_limit_reached:
+            with st.expander("⚠️ Zeitlimit für Pfadberechnung erreicht"):
+                st.write(f"Zeitlimit für Pfadberechnung von {time_limit_calculation} Sekunden erreicht. Ergebnisse unvollständig. Berechnete Pfade: {len(all_paths)}, Versuche: {count_calculations}")
+                # output all_calcs in json format for debugging
+                st.write(f"Alle berechneten Pfade (unabhängig von Gültigkeit und Ziel): {len(all_calcs)}")
+                for p in all_calcs[:20]:
+                    st.write(p.to_tuples())
+        return all_paths
+        
+    def evaluate_paths(self, paths: List[RoutingPath], n_best=10) -> List[Tuple[RoutingPath, float, datetime]]:
+        # return top n_best paths sorted by calculated_distance (with penalty) descending
+        evaluated = []
+        for path in paths:
+            if path.last_point() and path.last_point().name == "FINISH":
+                path.calc_total_distance()
+                finishing_time = path.calc_finishing_time()
+                minutes_late = max(0, (finishing_time - self.finish_point).total_seconds() / 60) if finishing_time else 0
+                calculated_distance = path.calc_calculated_distance(minutes_late)
+                evaluated.append((path, calculated_distance, finishing_time))
+        
+        evaluated.sort(key=lambda x: x[1], reverse=True)
+        return evaluated[:n_best]
+    
+    def run_optimization(self, start: str, end: str, logged_route: Optional[RoutingPath], next_target: Optional[str], n_best=10) -> List[Tuple[RoutingPath, float, datetime]]:
+        all_paths = self.find_all_paths(start, end, logged_route, next_target)
+        best_paths = self.evaluate_paths(all_paths, n_best=n_best)
+        return best_paths
 
 # =============================== Layer: Plot & Map ===================================
 
@@ -637,7 +769,7 @@ class MapEngine:
         # Linien
         bmap = {row['Name']: (float(row['LAT']), float(row['LON'])) for _, row in buoys.iterrows()}
         for _, rr in routes.iterrows():
-            b1, b2 = str(rr[0]), str(rr[1])
+            b1, b2 = str(rr.iloc[0]), str(rr.iloc[1])
             if b1 not in bmap or b2 not in bmap:
                 continue
             p1 = bmap[b1]; p2 = bmap[b2]
@@ -695,10 +827,10 @@ class UIApp:
         if log:
             last_b = log[-1][0]
             for _, r in self.routes_df.iterrows():
-                if r[0] == last_b:
-                    possible_targets.add(r[1])
-                elif r[1] == last_b:
-                    possible_targets.add(r[0])
+                if r.iloc[0] == last_b:
+                    possible_targets.add(r.iloc[1])
+                elif r.iloc[1] == last_b:
+                    possible_targets.add(r.iloc[0])
         else:
             possible_targets = set(self.start_bojes.copy())
         st.session_state['next_possible_targets'] = sorted(possible_targets)
@@ -748,7 +880,7 @@ class UIApp:
             x = (canvas_size - rotated.width) // 2
             y = (canvas_size - rotated.height) // 2
             canvas.paste(rotated, (x, y), rotated)
-            sidebar.image(canvas, use_container_width=False)
+            sidebar.image(canvas, width='content')
         else:
             st.error(f"⚠️ Icon nicht gefunden unter {ICON_ARROW_PATH}")
 
@@ -850,6 +982,7 @@ class UIApp:
                     with c1:
                         st.metric("theoretische Speed", f"{bs:.2f} kn")
                         st.metric("benötigte Zeit", f"{int(hours)}:{int((hours-int(hours))*60):02d} h:min")
+                        st.metric("ETA an nächster Boje", eta.strftime("%H:%M:%S"))
                     with c2:
                         total_dist = 0.0
                         if len(log) >= 2:
@@ -860,7 +993,6 @@ class UIApp:
                         st.metric("Heading zu nächster Boje", f"{int(heading):03d}°")
                         st.metric("Bisher gesegelte Distanz", f"{total_dist:.2f} nm")
                         st.metric("Distanz inkl. nächste Boje", f"{(total_dist+dist):.2f} nm")
-                        st.metric("ETA an nächster Boje", eta.strftime("%H:%M:%S"))
                 except Exception as e:
                     st.warning(f"ETA konnte nicht berechnet werden: {e}")
 
@@ -892,92 +1024,117 @@ class UIApp:
                 st.markdown("**Routentabelle (alle Routen)**")
 
             # sortiere das DataFrame nach "BS_kt" absteigend (dort sind die besten Routen oben)
-            st.dataframe(rt.sort_values(by='BS_kt', ascending=False).reset_index(drop=True), use_container_width=True)
+            st.dataframe(rt.sort_values(by='BS_kt', ascending=False).reset_index(drop=True), width='stretch')
             if (rt['Max_Passieren'] <= 0).any():
                 st.warning("Einige Routen können nicht mehr passiert werden (Max_Passieren ≤ 0). Bitte Log prüfen.")
         else:
             st.info("Bitte Bojen- und Routen-Dateien laden, um Karte und Tabelle zu sehen.")
 
     def section_optimization(self, cur_twd: float, cur_tws: float):
-        st.markdown("---")
-        st.subheader("Optimierung: 10 Varianten erzeugen")
-        if self.buoys_df is not None and self.routes_df is not None and self.polar_interp is not None and self.leeway_interp is not None:
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                start_b = st.selectbox("Start-Boje", options=self.start_bojes if self.start_bojes else list(self.buoys_df['Name'].astype(str).values), index=0)
-                start_date = st.date_input("Start-Datum", value=datetime.now())
-                start_dt = datetime.combine(start_date, st.time_input("Start-Zeit", value=datetime.now().time(), step=timedelta(minutes=5)))
-            with c2:
-                goal_b = "FINISH"
-                deadline_date = st.date_input("Ziel-Datum", value=(start_date + timedelta(hours=24)))
-                deadline_dt = datetime.combine(deadline_date, st.time_input("Ziel-Zeit", value=(start_dt + timedelta(hours=24)).time(), step=timedelta(minutes=5)))
-                _hard_deadline_dt = datetime.combine(deadline_date, st.time_input("Harte Deadline", value=(deadline_dt + timedelta(hours=1)).time(), step=timedelta(minutes=5)))
-            with c3:
-                max_steps = st.number_input("Max. Schritte pro Variante", min_value=3, max_value=200, value=30)
-                restarts = st.number_input("Restarts/Variante", min_value=1, max_value=20, value=5)
-            with c4:
-                n_variants = st.number_input("Anzahl Varianten", min_value=1, max_value=10, value=10)
+        with st.expander("🚀 Routen-Optimierung"):
+            if self.buoys_df is not None and self.routes_df is not None and self.polar_interp is not None and self.leeway_interp is not None:
+                opt_engine = OptimizationEngine(self.buoys_df, self.routes_df, self.polar_interp, self.leeway_interp)
+                opt_engine.set_wind(cur_twd, cur_tws)
 
-            run_opt = st.button("🔁 Optimieren (lädt CSVs neu)")
-            if run_opt:
-                # Im Original werden die aktuell geladenen DataFrames verwendet (erneutes Einlesen aus Cache ist sinngleich)
-                pol_interp = BilinearTable(self.polar_df, self.polar_df.columns[0], self.polar_df.columns[1], self.polar_df.columns[2])
-                lw_interp = BilinearTable(self.leeway_df, self.leeway_df.columns[0], self.leeway_df.columns[1], self.leeway_df.columns[2])
+                with st.expander("⚙️ Optimierungs-Einstellungen"):
+                    with st.form("optform", clear_on_submit=False):
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            start_time = st.text_input("Startzeit (YYYY-MM-DD HH:MM:SS)", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                            finish_open = st.text_input("Finish Öffnungszeit (YYYY-MM-DD HH:MM:SS)", value=(datetime.now() + timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S"))
+                        with c2:
+                            finish_point = st.text_input("Finish Sollzeit (YYYY-MM-DD HH:MM:SS)", value=(datetime.now() + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S"))
+                            deadline = st.text_input("Deadline Zeit (YYYY-MM-DD HH:MM:SS)", value=(datetime.now() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"))
+                        n_best = st.number_input("Anzahl beste Routen anzeigen", min_value=1, max_value=20, value=5, step=1)
 
-                # Log aufbereiten
-                passed_log: List[Tuple[str, datetime]] = []
-                for b, t in st.session_state.get('visit_log', []):
+                        # Button to set these values in session_state
+                        set_opt_settings = st.form_submit_button("⚙️ Optimierungs-Einstellungen übernehmen")
+                        if set_opt_settings:
+                            st.success("Optimierungs-Einstellungen übernommen.")
+                            st.session_state['opt_settings'] = {
+                                "start_time": start_time,
+                                "finish_open": finish_open,
+                                "finish_point": finish_point,
+                                "deadline": deadline,
+                                "n_best": n_best
+                            }
+                    if 'opt_settings' in st.session_state:
+                        #write back the settings to a new form fields
+                        settings = st.session_state['opt_settings']
+                        start_time = settings.get("start_time", start_time)
+                        finish_open = settings.get("finish_open", finish_open)
+                        finish_point = settings.get("finish_point", finish_point)
+                        deadline = settings.get("deadline", deadline)
+                        n_best = settings.get("n_best", n_best)
+
+                        st.table(pd.DataFrame([settings]))
+
+                run_opt = st.button("🚀 Optimierung starten")
+
+                if run_opt:
                     try:
-                        passed_log.append((b, datetime.strptime(t, "%Y-%m-%d %H:%M")))
-                    except Exception:
-                        pass
+                        dt_start = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+                        dt_finish_open = datetime.strptime(finish_open, "%Y-%m-%d %H:%M:%S")
+                        dt_finish_point = datetime.strptime(finish_point, "%Y-%m-%d %H:%M:%S")
+                        dt_deadline = datetime.strptime(deadline, "%Y-%m-%d %H:%M:%S")
+                        if dt_start >= dt_deadline:
+                            st.error("Startzeit muss vor der Deadline liegen.")
+                            return
+                        if dt_finish_open >= dt_deadline:
+                            st.error("Finish Öffnungszeit muss vor der Deadline liegen.")
+                            return
+                        if dt_finish_point >= dt_deadline:
+                            st.error("Finish Sollzeit muss vor der Deadline liegen.")
+                            return 
+                        opt_engine.set_timeframe(dt_start, dt_finish_open, dt_finish_point, dt_deadline)
+                        log = st.session_state.get('visit_log', [])
+                        last_b = log[0][0] if log else None
+                        next_b = st.session_state.get('next_target', None)
+                        # If no log and no next target, choose a start buoy from start_bojes via a selectbox
+                        if not last_b:
+                            if not self.start_bojes:
+                                st.error("Keine Startbojen definiert. Bitte Routen-Datei prüfen.")
+                                return
+                            start_b = st.selectbox("Startboje wählen", options=self.start_bojes)
+                            last_b = start_b
 
-                variants = RouteEngine.optimize_variants(
-                    self.buoys_df, self.routes_df, pol_interp, lw_interp,
-                    start_b, goal_b, start_dt, deadline_dt,
-                    cur_twd, cur_tws,
-                    passed_log, st.session_state.get('next_target'),
-                    n_variants=int(n_variants), max_steps=int(max_steps), restarts=int(restarts)
-                )
-                st.session_state['variants'] = variants
+                        
+                        best_paths = opt_engine.run_optimization(
+                            start=last_b,
+                            end="FINISH",
+                            logged_route=OptimizationEngine.log_to_routing_points(log) if log else None,
+                            next_target=next_b if next_b else None,
+                            n_best=n_best
+                        )
+                        if best_paths:
+                            st.success(f"{len(best_paths)} optimale Routen gefunden.")
+                            opt_results = []
+                            for i, (path, calc_dist, fin_time) in enumerate(best_paths):
+                                route_str = " → ".join([p.get_name() for p in path.points])
+                                opt_results.append({
+                                    "Rang": i + 1,
+                                    "Route": route_str,
+                                    "Berechnete Distanz [nm]": f"{calc_dist:.2f}",
+                                    "Finishing Time": fin_time.strftime("%Y-%m-%d %H:%M:%S") if fin_time else "N/A"
+                                })
+                            df_opt = pd.DataFrame(opt_results)
+                            st.dataframe(df_opt, use_container_width=True)
 
-        # Variantenanzeige
-        variants = st.session_state.get('variants', [])
-        if variants:
-            lc, rc = st.columns([1.0, 2.0])
-            with lc:
-                st.markdown("**Varianten (anklickbar)**")
-                labels = []
-                for i, v in enumerate(variants, 1):
-                    score = v['score_nm']
-                    arr = v['arrival'].strftime('%Y-%m-%d %H:%M')
-                    labels.append(f"Variante {i}: {score:.2f} NM (ETA {arr})")
-                selected = st.radio("", options=list(range(len(variants))), format_func=lambda i: labels[i])
-                st.session_state['selected_variant'] = int(selected)
-            with rc:
-                sel = variants[st.session_state.get('selected_variant', 0)]
-                pairs = [(sel['plan'][i], sel['plan'][i+1]) for i in range(len(sel['plan']) - 1)]
-                st.session_state['highlight_pairs'] = pairs
-                if self.buoys_df is not None and self.routes_df is not None:
-                    fmap2 = MapEngine(self.start_bojes).make_map(self.buoys_df, self.routes_df, highlight_pairs=pairs)
-                    st_folium(fmap2, width=None, height=500, returned_objects=[], key="map2", zoom=12)
+                            # Auswahl der besten Route
+                            sel_idx = st.number_input("Welche Route hervorheben?", min_value=1, max_value=len(best_paths), value=1, step=1)
+                            st.session_state['selected_variant'] = sel_idx - 1
+                            if 0 <= st.session_state['selected_variant'] < len(best_paths):
+                                sel_path = best_paths[st.session_state['selected_variant']][0]
+                                highlight_pairs = [(sel_path.points[i-1].name, sel_path.points[i].name) for i in range(1, len(sel_path.points))]
+                                st.session_state['highlight_pairs'] = highlight_pairs
+                                st.info(f"Route {sel_idx} hervorgehoben auf der Karte.")
+                        else:
+                            st.warning("Keine gültigen Routen gefunden. Bitte Log, Zeiten und Bedingungen prüfen.")
+                        
+                    except Exception as e:
+                        st.error(f"Fehler bei der Optimierung: {e}")
 
-            with st.expander("Übersicht aller Varianten (Top-Distanzen nach Abzug)"):
-                rows = []
-                for i, v in enumerate(variants, 1):
-                    nxt1 = v['plan'][1] if len(v['plan']) > 1 else None
-                    nxt2 = v['plan'][2] if len(v['plan']) > 2 else None
-                    rows.append({
-                        'Variante': i,
-                        'Distanz_NM_nach_Abzug': round(v['score_nm'], 2),
-                        'Ankunftszeit': v['arrival'].strftime('%Y-%m-%d %H:%M'),
-                        'Nächste_1': nxt1, 'Nächste_2': nxt2,
-                        'Gesamt_Distanz_NM': round(v['distance_nm'], 2)
-                    })
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
-        else:
-            st.caption("Noch keine Varianten berechnet.")
-
+                            
     def section_selfcheck_and_persist(self):
         # Selbst-Check (wie Original, nur strukturiert)
         with st.expander("✅ Selbst-Check (automatisch)"):
