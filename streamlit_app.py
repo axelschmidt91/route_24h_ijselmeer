@@ -599,14 +599,47 @@ class OptimizationEngine:
     def log_to_routing_points(log: List[Tuple[str, str]]) -> RoutingPath:
         return RoutingPath([RoutingPoint(name, datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")) for name, time_str in log])
     
+    def find_shortest_path(self, start: str, end: str) -> List[str]:
+        # BFS for shortest path in unweighted graph
+        from collections import deque
+        queue = deque([(start, [start])])
+        visited = set()
+        while queue:
+            current, path = queue.popleft()
+            if current == end:
+                return path
+            visited.add(current)
+            for neighbor in self.graph.get(current, []):
+                if neighbor not in visited:
+                    queue.append((neighbor, path + [neighbor]))
+        return []
+    
 
-    def find_all_paths(self, start: str, end: str, logged_route: Optional[RoutingPath], next_target: Optional[str]) -> List[RoutingPath]:
+    def find_longer_paths(self, start: str, end: str, logged_route: Optional[RoutingPath], next_target: Optional[str]) -> List[RoutingPath]:
         
+
         if logged_route:
             initial_route = logged_route
             start = logged_route.last_point().get_name() if logged_route.last_point() else start
         else:
             initial_route = RoutingPath([RoutingPoint(start, self.start_time)])
+
+        st.write(f"**Pfadberechnung von {start} nach {end}**")
+        shortest = self.find_shortest_path(start, end)
+        # Copy logged_route to avoid mutation and append shortest path if exists
+        if logged_route:
+            shortest_route = logged_route.copy()
+            for node in shortest[1:]:  # skip start as it's already in logged_route
+                # use RouteEngine.simulate_leg to get ETA
+                dist, heading, bs, hours = RouteEngine.simulate_leg(
+                    self.bmap, self.polar, self.leeway,
+                    self.twd, self.tws,
+                    shortest_route.last_point().get_name(), node
+                )
+                arrival = shortest_route.last_point().time + timedelta(hours=hours)
+                shortest_route.add_point(RoutingPoint(node, arrival))
+            st.write(f"Kürzester Pfad mit ETA: {shortest_route=}")
+
 
         if next_target:
             dist, heading, bs, hours = RouteEngine.simulate_leg(
@@ -625,7 +658,7 @@ class OptimizationEngine:
         # check if the ETA is before the deadline, if not, discard the path
         # check if the path is valid according to routes_df and Max_Passieren
         depth_limit = 10  # to prevent infinite recursion
-        time_limit_calculation = 20  # seconds
+        time_limit_calculation = 1  # seconds
         start_time = datetime.now()
         flag_time_limit_reached = False
         count_calculations = 0
@@ -686,7 +719,7 @@ class OptimizationEngine:
         return evaluated[:n_best]
     
     def run_optimization(self, start: str, end: str, logged_route: Optional[RoutingPath], next_target: Optional[str], n_best=10) -> List[Tuple[RoutingPath, float, datetime]]:
-        all_paths = self.find_all_paths(start, end, logged_route, next_target)
+        all_paths = self.find_longer_paths(start, end, logged_route, next_target)
         best_paths = self.evaluate_paths(all_paths, n_best=n_best)
         return best_paths
 
